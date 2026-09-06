@@ -1,3 +1,11 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
 plugins {
     // Lets Gradle auto-provision the JDK 17 toolchain (kotlin { jvmToolchain(17) })
     // on machines that don't already have one installed.
@@ -7,3 +15,4 @@ plugins {
 rootProject.name = "trace"
 
 include("trace-core")
+include("trace-android")

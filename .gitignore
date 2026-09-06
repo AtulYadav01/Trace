@@ -2,6 +2,13 @@
 .gradle/
 build/
 
+# Android
+local.properties
+*.apk
+*.aab
+captures/
+.cxx/
+
 # IDE
 .idea/
 *.iml
@@ -31,3 +38,11 @@ ongoing-work.md
 project-context.md
 dev-notes.md
 TODO.md
+
+# Local Claude/AI project memory system (local only, never committed).
+# Ignore only the memory files, not the whole .claude/ directory, so that
+# committable Claude Code config (e.g. .claude/settings.json) is still allowed.
+.claude/ongoing-work.md
+.claude/tasks.md
+.claude/lessons.md
+.claude/project-knowledge.md
