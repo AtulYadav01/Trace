@@ -23,3 +23,9 @@ build/
 
 # Test output
 out/
+
+# Local documentation (not pushed to git)
+ongoing-work.md
+project-context.md
+dev-notes.md
+TODO.md
