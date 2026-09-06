@@ -3,6 +3,7 @@ package dev.trace.android
 import android.app.Application
 import dev.trace.android.internal.AndroidTraceSession
 import dev.trace.android.internal.EventFactory
+import dev.trace.android.internal.LifecycleTracker
 import java.io.File
 
 /**
@@ -30,6 +31,9 @@ object TraceAndroid {
     @Volatile
     private var session: AndroidTraceSession? = null
 
+    private var application: Application? = null
+    private var lifecycleTracker: LifecycleTracker? = null
+
     /** `true` while a session is actively recording. */
     val isRunning: Boolean
         get() = session?.isRunning == true
@@ -55,10 +59,14 @@ object TraceAndroid {
             val directory = config.outputDirectory ?: File(application.filesDir, "trace")
             val newSession = AndroidTraceSession.start(directory, config)
             session = newSession
+            this.application = application
 
             newSession.record(EventFactory.appStart(application))
-            // Trackers (lifecycle / interaction / exception) are installed here
-            // in later commits.
+
+            if (config.captureLifecycle) {
+                lifecycleTracker = LifecycleTracker(newSession).also { it.install(application) }
+            }
+            // Interaction / exception trackers are installed here in later commits.
             return true
         }
     }
@@ -71,7 +79,9 @@ object TraceAndroid {
     fun stop() {
         synchronized(lock) {
             val current = session ?: return
-            // Trackers are uninstalled here in later commits.
+            application?.let { app -> lifecycleTracker?.uninstall(app) }
+            lifecycleTracker = null
+            application = null
             current.stop(EventFactory.appStop())
         }
     }
@@ -100,6 +110,9 @@ object TraceAndroid {
      */
     internal fun resetForTesting() {
         synchronized(lock) {
+            application?.let { app -> lifecycleTracker?.uninstall(app) }
+            lifecycleTracker = null
+            application = null
             session?.takeIf { it.isRunning }?.stop(null)
             session = null
         }
