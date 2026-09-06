@@ -3,6 +3,7 @@ package dev.trace.android
 import android.app.Application
 import dev.trace.android.internal.AndroidTraceSession
 import dev.trace.android.internal.EventFactory
+import dev.trace.android.internal.InteractionTracker
 import dev.trace.android.internal.LifecycleTracker
 import java.io.File
 
@@ -33,6 +34,7 @@ object TraceAndroid {
 
     private var application: Application? = null
     private var lifecycleTracker: LifecycleTracker? = null
+    private var interactionTracker: InteractionTracker? = null
 
     /** `true` while a session is actively recording. */
     val isRunning: Boolean
@@ -66,7 +68,10 @@ object TraceAndroid {
             if (config.captureLifecycle) {
                 lifecycleTracker = LifecycleTracker(newSession).also { it.install(application) }
             }
-            // Interaction / exception trackers are installed here in later commits.
+            if (config.captureInteractions) {
+                interactionTracker = InteractionTracker(newSession, config).also { it.install(application) }
+            }
+            // Exception tracker is installed here in a later commit.
             return true
         }
     }
@@ -79,8 +84,12 @@ object TraceAndroid {
     fun stop() {
         synchronized(lock) {
             val current = session ?: return
-            application?.let { app -> lifecycleTracker?.uninstall(app) }
+            application?.let { app ->
+                lifecycleTracker?.uninstall(app)
+                interactionTracker?.uninstall(app)
+            }
             lifecycleTracker = null
+            interactionTracker = null
             application = null
             current.stop(EventFactory.appStop())
         }
@@ -110,8 +119,12 @@ object TraceAndroid {
      */
     internal fun resetForTesting() {
         synchronized(lock) {
-            application?.let { app -> lifecycleTracker?.uninstall(app) }
+            application?.let { app ->
+                lifecycleTracker?.uninstall(app)
+                interactionTracker?.uninstall(app)
+            }
             lifecycleTracker = null
+            interactionTracker = null
             application = null
             session?.takeIf { it.isRunning }?.stop(null)
             session = null
