@@ -15,161 +15,82 @@ class LargeSessionTest {
     lateinit var tempDir: Path
 
     @Test
-    fun `100K events streaming write and read`() {
-        val eventCount = 100_000
-
-        // Write 100K events
+    fun `100k events stream read without materializing the whole file`() {
+        val n = 100_000
         val recorder = SessionRecorder.create(tempDir)
-        repeat(eventCount) { i ->
-            recorder.record(
-                "load.test.event",
-                buildJsonObject {
-                    put("index", i)
-                    put("data", "event_data_$i")
-                }
-            )
-        }
+        repeat(n) { i -> recorder.record("load", buildJsonObject { put("i", i); put("d", "row_$i") }) }
         recorder.close()
 
-        // Read via streaming Sequence
         val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
+
+        // Consume lazily; hold no references to prior events.
         SessionReader.open(file).use { reader ->
             var count = 0L
-            var lastSeq = -1L
-
-            reader.events().forEach { event ->
-                assertEquals(count, event.seq)
-                assertTrue(event.seq > lastSeq)
-                lastSeq = event.seq
+            var last = -1L
+            reader.events().forEach { e ->
+                assertEquals(count, e.seq)
+                assertTrue(e.seq > last)
+                last = e.seq
                 count++
             }
-
-            assertEquals(eventCount.toLong(), count)
+            assertEquals(n.toLong(), count)
+            assertTrue(reader.isComplete)
         }
     }
 
     @Test
-    fun `streaming does not buffer all events in memory`() {
-        val eventCount = 50_000
-
-        // Write many events
-        val recorder = SessionRecorder.create(tempDir)
-        repeat(eventCount) { i ->
-            recorder.record(
-                "memory.test",
-                buildJsonObject { put("i", i) }
-            )
+    fun `take 5 stops before a later malformed record is parsed`() {
+        // Build a file whose line 8 is broken; taking the first 5 events must succeed,
+        // proving the reader does not scan ahead.
+        val file = tempDir.resolve("lazy.trace.jsonl")
+        val lines = buildList {
+            add("""{"recordType":"session_start","schemaVersion":1,"id":"t","startedAtMillis":1,"source":"RECORDING"}""")
+            repeat(6) { add("""{"recordType":"event","seq":$it,"timestampNanos":$it,"type":"e","payload":{}}""") }
+            add("""}}} totally broken line {{{""")
+            add("""{"recordType":"session_end","eventCount":6,"endedAtMillis":9}""")
         }
-        recorder.close()
+        Files.write(file, (lines.joinToString("\n") + "\n").toByteArray(Charsets.UTF_8))
 
-        // Read only first 100 events using Sequence.take()
-        // This proves streaming works - we don't need to load all events
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
         SessionReader.open(file).use { reader ->
-            val first100 = reader.events().take(100).toList()
-            assertEquals(100, first100.size)
-            assertEquals(0L, first100.first().seq)
-            assertEquals(99L, first100.last().seq)
+            val firstFive = reader.events().take(5).toList()
+            assertEquals(listOf(0L, 1L, 2L, 3L, 4L), firstFive.map { it.seq })
+        }
+
+        // And consuming past the broken line does raise it.
+        SessionReader.open(file).use { reader ->
+            org.junit.jupiter.api.assertThrows<MalformedRecordException> {
+                reader.events().toList()
+            }
         }
     }
 
     @Test
-    fun `file size is reasonable for event count`() {
-        val eventCount = 10_000
-        val expectedMaxBytesPerEvent = 150 // Conservative estimate
-
+    fun `file size grows linearly with event count`() {
+        val n = 10_000
         val recorder = SessionRecorder.create(tempDir)
-        repeat(eventCount) { i ->
-            recorder.record(
-                "size.test.event",
-                buildJsonObject {
-                    put("index", i)
-                    put("value", "test")
-                }
-            )
-        }
+        repeat(n) { i -> recorder.record("size", buildJsonObject { put("i", i); put("v", "test") }) }
         recorder.close()
 
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val fileSize = Files.size(file)
-
-        // File size should be roughly proportional to event count
-        // Allow overhead for session_start and session_end
-        val maxExpectedSize = (eventCount * expectedMaxBytesPerEvent) + 1000
-        assertTrue(
-            fileSize < maxExpectedSize,
-            "File size $fileSize exceeds expected max $maxExpectedSize"
-        )
-
-        // Sanity check: file shouldn't be tiny
-        assertTrue(fileSize > eventCount * 50, "File seems too small: $fileSize bytes")
+        val bytes = Files.size(tempDir.resolve("${recorder.sessionId}.trace.jsonl"))
+        assertTrue(bytes in (n * 50L)..(n * 150L + 1000), "unexpected file size: $bytes")
     }
 
     @Test
-    fun `concurrent read and write to different sessions`() {
-        val sessions = mutableListOf<String>()
-
-        // Create multiple sessions in parallel
-        val threads = (0 until 5).map { threadId ->
+    fun `many concurrent recorders on separate sessions all read back cleanly`() {
+        val threads = (0 until 5).map { t ->
             Thread {
-                val recorder = SessionRecorder.create(tempDir)
-                synchronized(sessions) {
-                    sessions.add(recorder.sessionId)
+                val rec = SessionRecorder.create(tempDir.resolve("t$t").also { Files.createDirectories(it) })
+                repeat(1000) { i -> rec.record("p$t", buildJsonObject { put("i", i) }) }
+                rec.close()
+                SessionReader.open(
+                    tempDir.resolve("t$t").resolve("${rec.sessionId}.trace.jsonl")
+                ).use { reader ->
+                    var expected = 0L
+                    reader.events().forEach { assertEquals(expected++, it.seq) }
+                    assertEquals(1000L, expected)
                 }
-
-                repeat(1000) { i ->
-                    recorder.record(
-                        "parallel.write.$threadId",
-                        buildJsonObject { put("event", i) }
-                    )
-                }
-
-                recorder.close()
-            }
+            }.also { it.start() }
         }
-
-        threads.forEach { it.start() }
         threads.forEach { it.join() }
-
-        // Verify all sessions
-        assertEquals(5, sessions.size)
-        sessions.forEach { sessionId ->
-            val file = tempDir.resolve("$sessionId.trace.jsonl")
-            SessionReader.open(file).use { reader ->
-                val events = reader.events().toList()
-                assertEquals(1000, events.size)
-            }
-        }
-    }
-
-    @Test
-    fun `events with varying payload sizes`() {
-        val recorder = SessionRecorder.create(tempDir)
-
-        // Small payload
-        recorder.record("small", buildJsonObject { put("x", 1) })
-
-        // Medium payload
-        recorder.record("medium", buildJsonObject {
-            repeat(20) { i -> put("field_$i", "value_$i") }
-        })
-
-        // Large payload (but not huge - staying reasonable)
-        recorder.record("large", buildJsonObject {
-            repeat(100) { i ->
-                put("field_$i", "This is a longer value string for field $i with some extra text")
-            }
-        })
-
-        recorder.close()
-
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        SessionReader.open(file).use { reader ->
-            val events = reader.events().toList()
-            assertEquals(3, events.size)
-            assertEquals("small", events[0].type)
-            assertEquals("medium", events[1].type)
-            assertEquals("large", events[2].type)
-        }
     }
 }

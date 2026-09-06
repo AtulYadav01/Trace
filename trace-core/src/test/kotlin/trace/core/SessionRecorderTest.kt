@@ -10,7 +10,6 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -25,204 +24,215 @@ class SessionRecorderTest {
     @TempDir
     lateinit var tempDir: Path
 
+    private fun fileFor(recorder: SessionRecorder): Path =
+        tempDir.resolve("${recorder.sessionId}.trace.jsonl")
+
     @Test
-    fun `creates file with session_start`() {
+    fun `create writes session_start as first record`() {
         val recorder = SessionRecorder.create(tempDir)
         recorder.close()
 
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
+        val lines = Files.readAllLines(fileFor(recorder))
+        val first = json.decodeFromString<TraceRecord>(lines[0])
+        assertTrue(first is SessionStart)
+        assertEquals(recorder.sessionId, (first as SessionStart).id)
+        assertEquals(CURRENT_SCHEMA_VERSION, first.schemaVersion)
+        assertEquals(SessionSource.RECORDING, first.source)
+    }
+
+    @Test
+    fun `file name is uuid dot trace dot jsonl`() {
+        val recorder = SessionRecorder.create(tempDir)
+        recorder.close()
+        val file = fileFor(recorder)
         assertTrue(Files.exists(file))
-
-        val lines = Files.readAllLines(file)
-        assertTrue(lines.isNotEmpty())
-
-        val firstRecord = json.decodeFromString<TraceRecord>(lines[0])
-        assertTrue(firstRecord is SessionStart)
-        assertEquals(recorder.sessionId, (firstRecord as SessionStart).id)
-        assertEquals(CURRENT_SCHEMA_VERSION, firstRecord.schemaVersion)
-        assertEquals(SessionSource.RECORDING, firstRecord.source)
+        assertTrue(file.fileName.toString() == "${recorder.sessionId}.trace.jsonl")
+        assertNotNull(java.util.UUID.fromString(recorder.sessionId))
     }
 
     @Test
-    fun `records events with increasing seq`() {
+    fun `events get sequential seq starting at 0`() {
         val recorder = SessionRecorder.create(tempDir)
-
-        recorder.record("test.event", buildJsonObject { put("index", 0) })
-        recorder.record("test.event", buildJsonObject { put("index", 1) })
-        recorder.record("test.event", buildJsonObject { put("index", 2) })
-
+        repeat(4) { recorder.record("t", buildJsonObject { put("i", it) }) }
         recorder.close()
 
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        // Lines: session_start, event0, event1, event2, session_end
-        assertEquals(5, lines.size)
-
-        val event0 = json.decodeFromString<EventRecord>(lines[1])
-        val event1 = json.decodeFromString<EventRecord>(lines[2])
-        val event2 = json.decodeFromString<EventRecord>(lines[3])
-
-        assertEquals(0L, event0.seq)
-        assertEquals(1L, event1.seq)
-        assertEquals(2L, event2.seq)
+        val lines = Files.readAllLines(fileFor(recorder))
+        assertEquals(6, lines.size) // start + 4 events + end
+        val seqs = lines.subList(1, 5).map { json.decodeFromString<EventRecord>(it).seq }
+        assertEquals(listOf(0L, 1L, 2L, 3L), seqs)
     }
 
     @Test
-    fun `records events with monotonic timestamps`() {
+    fun `timestamps are non-decreasing`() {
         val recorder = SessionRecorder.create(tempDir)
-
-        repeat(10) {
-            recorder.record("test.event", JsonObject(emptyMap()))
-            Thread.sleep(1) // Ensure some time passes
-        }
-
+        repeat(50) { recorder.record("t", JsonObject(emptyMap())) }
         recorder.close()
 
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        var lastTimestamp = -1L
-        for (i in 1 until lines.size - 1) { // Skip session_start and session_end
-            val event = json.decodeFromString<EventRecord>(lines[i])
-            assertTrue(event.timestampNanos >= lastTimestamp,
-                "Timestamps must be monotonically non-decreasing")
-            lastTimestamp = event.timestampNanos
+        val lines = Files.readAllLines(fileFor(recorder))
+        var last = -1L
+        lines.subList(1, lines.size - 1).forEach {
+            val ts = json.decodeFromString<EventRecord>(it).timestampNanos
+            assertTrue(ts >= 0 && ts >= last, "timestamp $ts < previous $last")
+            last = ts
         }
     }
 
     @Test
-    fun `close writes session_end`() {
+    fun `close writes session_end with event count`() {
         val recorder = SessionRecorder.create(tempDir)
-        recorder.record("test.event", JsonObject(emptyMap()))
-        recorder.record("test.event", JsonObject(emptyMap()))
+        recorder.record("t", JsonObject(emptyMap()))
+        recorder.record("t", JsonObject(emptyMap()))
         recorder.close()
 
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        val lastRecord = json.decodeFromString<TraceRecord>(lines.last())
-        assertTrue(lastRecord is SessionEnd)
-        assertEquals(2L, (lastRecord as SessionEnd).eventCount)
+        val lines = Files.readAllLines(fileFor(recorder))
+        val last = json.decodeFromString<TraceRecord>(lines.last())
+        assertTrue(last is SessionEnd)
+        assertEquals(2L, (last as SessionEnd).eventCount)
     }
 
     @Test
-    fun `close is idempotent`() {
+    fun `close is idempotent across many calls`() {
         val recorder = SessionRecorder.create(tempDir)
-        recorder.record("test.event", JsonObject(emptyMap()))
+        recorder.record("t", JsonObject(emptyMap()))
+        repeat(5) { recorder.close() }
 
-        // Multiple closes should not throw
-        recorder.close()
-        recorder.close()
-        recorder.close()
-
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        // Should still have exactly one session_end
-        val sessionEnds = lines.filter { it.contains("session_end") }
-        assertEquals(1, sessionEnds.size)
+        val lines = Files.readAllLines(fileFor(recorder))
+        assertEquals(1, lines.count { it.contains("\"recordType\":\"session_end\"") })
     }
 
     @Test
-    fun `record after close throws`() {
+    fun `record after close throws IllegalStateException`() {
         val recorder = SessionRecorder.create(tempDir)
         recorder.close()
-
         assertThrows<IllegalStateException> {
-            recorder.record("test.event", JsonObject(emptyMap()))
+            recorder.record("t", JsonObject(emptyMap()))
         }
     }
 
     @Test
-    fun `empty type rejected`() {
+    fun `empty type is rejected`() {
         val recorder = SessionRecorder.create(tempDir)
-
-        assertThrows<IllegalArgumentException> {
-            recorder.record("", JsonObject(emptyMap()))
-        }
-
+        assertThrows<IllegalArgumentException> { recorder.record("", JsonObject(emptyMap())) }
         recorder.close()
     }
 
     @Test
-    fun `thread-safe recording`() {
-        val recorder = SessionRecorder.create(tempDir)
-        val threadCount = 10
-        val eventsPerThread = 100
-        val executor = Executors.newFixedThreadPool(threadCount)
-        val latch = CountDownLatch(threadCount)
+    fun `replay session records source and replayOf`() {
+        val recorder = SessionRecorder.create(tempDir, replayOf = "orig-123")
+        recorder.close()
+        val start = json.decodeFromString<SessionStart>(Files.readAllLines(fileFor(recorder))[0])
+        assertEquals(SessionSource.REPLAY, start.source)
+        assertEquals("orig-123", start.replayOf)
+    }
 
-        repeat(threadCount) { threadId ->
-            executor.submit {
-                try {
-                    repeat(eventsPerThread) { eventId ->
-                        recorder.record(
-                            "thread.$threadId.event",
-                            buildJsonObject { put("eventId", eventId) }
-                        )
+    @Test
+    fun `recording session has RECORDING source and null replayOf`() {
+        val recorder = SessionRecorder.create(tempDir)
+        recorder.close()
+        val start = json.decodeFromString<SessionStart>(Files.readAllLines(fileFor(recorder))[0])
+        assertEquals(SessionSource.RECORDING, start.source)
+        assertEquals(null, start.replayOf)
+    }
+
+    @Test
+    fun `lines are LF terminated not CRLF`() {
+        val recorder = SessionRecorder.create(tempDir)
+        recorder.record("t", buildJsonObject { put("x", 1) })
+        recorder.close()
+
+        val raw = Files.readAllBytes(fileFor(recorder)).toString(Charsets.UTF_8)
+        assertTrue(raw.endsWith("\n"))
+        assertTrue(!raw.contains("\r"), "file must not contain CR")
+        assertEquals(3, raw.split("\n").filter { it.isNotEmpty() }.size)
+    }
+
+    @Test
+    fun `concurrent record then reader round-trip yields exact sequence 0 to N-1`() {
+        // Regression test for the seq/timestamp-outside-the-lock bug.
+        // ONE recorder, many threads, then read the SAME file with SessionReader.
+        // MUST NOT sort. This fails on the old implementation.
+        val threadCount = 8
+        val perThread = 2000
+        val total = threadCount * perThread
+
+        val recorder = SessionRecorder.create(tempDir)
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(threadCount)
+        val threads = (0 until threadCount).map { t ->
+            Thread {
+                start.await()
+                repeat(perThread) { e ->
+                    recorder.record("thread.$t", buildJsonObject { put("e", e) })
+                }
+                done.countDown()
+            }.also { it.start() }
+        }
+        start.countDown()
+        done.await()
+        threads.forEach { it.join() }
+        recorder.close()
+
+        SessionReader.open(fileFor(recorder)).use { reader ->
+            var expected = 0L
+            reader.events().forEach { event ->
+                assertEquals(expected, event.seq, "seq out of order in file")
+                expected++
+            }
+            assertEquals(total.toLong(), expected)
+            assertTrue(reader.isComplete)
+        }
+    }
+
+    @Test
+    fun `record racing close never throws raw IOException and leaves a valid file`() {
+        repeat(60) { iteration ->
+            val dir = tempDir.resolve("rc$iteration")
+            Files.createDirectories(dir)
+            val recorder = SessionRecorder.create(dir)
+
+            var sawWrongException: Throwable? = null
+            val writer = Thread {
+                repeat(200) { e ->
+                    try {
+                        recorder.record("t", buildJsonObject { put("e", e) })
+                    } catch (ok: IllegalStateException) {
+                        // expected once close() has won the race
+                    } catch (bad: Throwable) {
+                        sawWrongException = bad
                     }
-                } finally {
-                    latch.countDown()
                 }
             }
+            writer.start()
+            recorder.close()
+            writer.join()
+
+            assertTrue(
+                sawWrongException == null,
+                "record() leaked ${sawWrongException?.let { it::class.simpleName }}: ${sawWrongException?.message}"
+            )
+
+            // Whatever interleaving happened, the file must be readable and continuous.
+            val file = dir.resolve("${recorder.sessionId}.trace.jsonl")
+            SessionReader.open(file).use { reader ->
+                var expected = 0L
+                reader.events().forEach { assertEquals(expected++, it.seq) }
+                assertTrue(reader.isComplete)
+            }
         }
-
-        latch.await()
-        recorder.close()
-        executor.shutdown()
-
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        // session_start + (threadCount * eventsPerThread) events + session_end
-        val expectedLines = 1 + (threadCount * eventsPerThread) + 1
-        assertEquals(expectedLines, lines.size)
-
-        // Verify all seq numbers are unique and cover 0 to (total-1)
-        val seqNumbers = lines
-            .drop(1)  // Skip session_start
-            .dropLast(1)  // Skip session_end
-            .map { json.decodeFromString<EventRecord>(it).seq }
-            .sorted()
-
-        val expectedSeq = (0L until (threadCount * eventsPerThread).toLong()).toList()
-        assertEquals(expectedSeq, seqNumbers)
     }
 
     @Test
-    fun `replay session has correct source and replayOf`() {
-        val originalId = "original-session-123"
-        val recorder = SessionRecorder.create(tempDir, replayOf = originalId)
-        recorder.close()
-
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        val sessionStart = json.decodeFromString<SessionStart>(lines[0])
-        assertEquals(SessionSource.REPLAY, sessionStart.source)
-        assertEquals(originalId, sessionStart.replayOf)
-    }
-
-    @Test
-    fun `recording session has RECORDING source`() {
+    fun `100k events write then stream read`() {
+        val n = 100_000
         val recorder = SessionRecorder.create(tempDir)
+        repeat(n) { i -> recorder.record("load", buildJsonObject { put("i", i) }) }
         recorder.close()
 
-        val file = tempDir.resolve("${recorder.sessionId}.trace.jsonl")
-        val lines = Files.readAllLines(file)
-
-        val sessionStart = json.decodeFromString<SessionStart>(lines[0])
-        assertEquals(SessionSource.RECORDING, sessionStart.source)
-        assertEquals(null, sessionStart.replayOf)
-    }
-
-    @Test
-    fun `sessionId is a valid UUID`() {
-        val recorder = SessionRecorder.create(tempDir)
-
-        assertNotNull(java.util.UUID.fromString(recorder.sessionId))
-
-        recorder.close()
+        SessionReader.open(fileFor(recorder)).use { reader ->
+            var count = 0L
+            reader.events().forEach { assertEquals(count++, it.seq) }
+            assertEquals(n.toLong(), count)
+            assertTrue(reader.isComplete)
+        }
     }
 }

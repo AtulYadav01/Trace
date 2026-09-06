@@ -1,0 +1,8 @@
+# The Gradle wrapper script must stay LF so it runs on Unix after checkout.
+gradlew text eol=lf
+*.bat text eol=crlf
+gradle/wrapper/gradle-wrapper.jar binary
+
+# Kotlin / Gradle sources: normalize to LF.
+*.kt text eol=lf
+*.kts text eol=lf

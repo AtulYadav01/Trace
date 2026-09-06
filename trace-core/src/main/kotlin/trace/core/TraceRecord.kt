@@ -7,9 +7,13 @@ import kotlinx.serialization.json.JsonObject
 /**
  * Sealed hierarchy representing all record types in a TRACE session file.
  * Each line in a .trace.jsonl file deserializes to one of these types.
+ *
+ * These types are an implementation detail of the on-disk format and are
+ * deliberately `internal`. Consumers interact with [Event] and [SessionReader]
+ * / [SessionRecorder] only.
  */
 @Serializable
-sealed class TraceRecord {
+internal sealed class TraceRecord {
     abstract val recordType: String
 }
 
@@ -18,7 +22,7 @@ sealed class TraceRecord {
  */
 @Serializable
 @SerialName("session_start")
-data class SessionStart(
+internal data class SessionStart(
     override val recordType: String = "session_start",
     val schemaVersion: Int,
     val id: String,
@@ -32,7 +36,7 @@ data class SessionStart(
  */
 @Serializable
 @SerialName("event")
-data class EventRecord(
+internal data class EventRecord(
     override val recordType: String = "event",
     val seq: Long,
     val timestampNanos: Long,
@@ -45,7 +49,7 @@ data class EventRecord(
  */
 @Serializable
 @SerialName("session_end")
-data class SessionEnd(
+internal data class SessionEnd(
     override val recordType: String = "session_end",
     val eventCount: Long,
     val endedAtMillis: Long
@@ -66,4 +70,4 @@ enum class SessionSource {
 /**
  * Current schema version for TRACE session files.
  */
-const val CURRENT_SCHEMA_VERSION = 1
+internal const val CURRENT_SCHEMA_VERSION = 1

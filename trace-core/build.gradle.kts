@@ -1,11 +1,15 @@
 plugins {
     kotlin("jvm")
     kotlin("plugin.serialization")
+    `java-library`
 }
 
 dependencies {
-    // Kotlinx Serialization
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    // Kotlinx Serialization.
+    // `api` (not `implementation`) because JsonObject appears in the public API
+    // (Event.payload, SessionRecorder.record), so consumers need it on their
+    // compile classpath transitively.
+    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // Testing
     testImplementation(kotlin("test"))
