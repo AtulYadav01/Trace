@@ -16,3 +16,4 @@ rootProject.name = "trace"
 
 include("trace-core")
 include("trace-android")
+include("trace-demo")
