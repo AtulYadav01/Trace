@@ -182,6 +182,30 @@ class InteractionTrackerTest {
         assertFalse(events().any { it.type == "android.ui.click" })
     }
 
+    @Test
+    fun `tap on a password field records no click`() {
+        TraceAndroid.start(app, TraceConfig(outputDirectory = outDir))
+        val controller = Robolectric.buildActivity(HomeTestActivity::class.java)
+        val activity = controller.setup().get()
+        val field = EditText(activity).apply {
+            isClickable = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+        activity.setContentView(field)
+        controller.pause().resume()
+        forceLayout(activity.window.decorView)
+        forceLayout(field)
+
+        tapCenterOf(activity, field)
+        TraceAndroid.stop()
+
+        assertFalse(
+            "password field must produce no click events",
+            events().any { it.type == "android.ui.click" },
+        )
+    }
+
     // ---- text ----
 
     @Test

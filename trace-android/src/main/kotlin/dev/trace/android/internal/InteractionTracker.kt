@@ -23,9 +23,11 @@ import dev.trace.android.TraceConfig
  * - **Clicks**: on `onActivityResumed` the activity's [android.view.Window.Callback]
  *   is wrapped with [TracingWindowCallback]. On every touch-up the deepest
  *   clickable view under the touch point is resolved by hit-testing the decor
- *   view and a click event is recorded. This captures *"the user tapped this
- *   view"* for touch input. It does **not** capture programmatic `performClick()`,
- *   key/D-pad activation, or input in a window TRACE did not wrap.
+ *   view and a click event is recorded, unless that view is a password
+ *   [EditText] (per [isPasswordField]), which produces **no** click event
+ *   either. This captures *"the user tapped this view"* for touch input. It
+ *   does **not** capture programmatic `performClick()`, key/D-pad activation,
+ *   or input in a window TRACE did not wrap.
  * - **Text changes**: a [TextWatcher] is attached to every non-password
  *   [EditText] found in the tree. Password fields (detected by `inputType`
  *   variation and by [PasswordTransformationMethod], with an id/hint keyword
@@ -99,6 +101,7 @@ internal class InteractionTracker(
     private fun onTouchUp(activity: Activity, activityName: String, event: MotionEvent) {
         val root = activity.window?.decorView ?: return
         val target = deepestClickable(root, event.rawX.toInt(), event.rawY.toInt()) ?: return
+        if (target is EditText && isPasswordField(target)) return // never recorded
         recordClick(target, activityName)
     }
 
